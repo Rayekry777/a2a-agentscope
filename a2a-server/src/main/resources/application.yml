@@ -1,0 +1,14 @@
+﻿server:
+  port: 8080
+
+spring:
+  ai:
+    openai:
+      base-url: https://dashscope.aliyuncs.com/compatible-mode
+      api-key: ${DASHSCOPE_API_KEY}
+      chat:
+        options:
+          model: deepseek-v4.1-flash
+          temperature: 0.7
+          # 推理模型思考过程很吃 token，给足空间
+          max-tokens: 8192

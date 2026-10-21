@@ -1,6 +1,8 @@
 package com.ray.a2a.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ray.a2a.config.WebhookRegistry;
+import com.ray.a2a.executor.AsyncTaskExecutor;
 import com.ray.a2a.model.*;
 import com.ray.a2a.repository.TaskRepository;
 import com.ray.a2a.skill.ReportGenerationSkillHandler;
@@ -33,16 +35,22 @@ public class A2aController {
     private final Map<String, SkillHandler> skillHandlers;
     private final TaskRepository taskRepository;
     private final ObjectMapper objectMapper;
+    private final WebhookRegistry webhookRegistry;
+    private final AsyncTaskExecutor asyncTaskExecutor;
 
     public A2aController(
             List<SkillHandler> handlers,
             TaskRepository taskRepository,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            WebhookRegistry webhookRegistry,
+            AsyncTaskExecutor asyncTaskExecutor) {
 
         this.skillHandlers = new HashMap<>();
         handlers.forEach(h -> skillHandlers.put(h.skillId(), h));
         this.taskRepository = taskRepository;
         this.objectMapper = objectMapper;
+        this.webhookRegistry = webhookRegistry;
+        this.asyncTaskExecutor = asyncTaskExecutor;
     }
 
     /** 统一 JSON-RPC 入口，按 method 分发 */
@@ -52,43 +60,50 @@ public class A2aController {
             case "tasks/send"   -> handleTaskSend(request);
             case "tasks/get"    -> handleTaskGet(request);
             case "tasks/cancel" -> handleTaskCancel(request);
+            case "tasks/pushNotification/set" -> handleSetPushNotification(request);
             default -> JsonRpcResponse.error(-32601, "Method not found: " + request.method(), request.id());
         };
     }
 
     /**
-     * tasks/send：执行流程
-     * 
-     *   - 解析参数（taskId、sessionId、skillId、history）     *   - 先落库一条 SUBMITTED 状态的任务（便于后续 tasks/get 查询）     *   - 按 skillId 找 SkillHandler，找不到返回 -32602     *   - 同步执行 handler.handle()，拿到 COMPLETED 状态的 Task     *   - 覆盖落库，返回完整 Task     * 
+     * tasks/send：异步提交任务
+     *
+     *   - 解析参数（taskId、sessionId、skillId、history）
+     *   - 先落库 SUBMITTED 状态，立刻返回（不等 LLM 执行完）
+     *   - 后台 AsyncTaskExecutor 异步执行 Skill，完成后通过 Webhook 回调 client
+     *   - 续传任务（input-required 状态）仍同步执行，因为需要基于上下文继续生成
      */
     private JsonRpcResponse handleTaskSend(JsonRpcRequest request) {
         Map<String, Object> params = request.params();
         String taskId = (String) params.getOrDefault("id", UUID.randomUUID().toString());
         String sessionId = (String) params.getOrDefault("sessionId", UUID.randomUUID().toString());
         String skillId = (String) params.get("skillId");
-
         List<Message> history = parseHistory(
                 (List<Map<String, Object>>) params.get("history"));
-
-        // 检查是否是续传任务（同一 taskId 且之前处于 input-required 状态）
+        // 检查是否续传任务
         Task existingTask = taskRepository.findById(taskId);
         boolean isContinuation = existingTask != null &&
                 TaskState.INPUT_REQUIRED.equals(existingTask.status().state());
-
-        SkillHandler handler = skillHandlers.get(skillId);
-        if (handler == null) {
-            return JsonRpcResponse.error(-32602, "Unknown skill: " + skillId, request.id());
+        // 续传任务走同步（input-required 场景不适合异步）
+        if (isContinuation) {
+            SkillHandler handler = skillHandlers.get(skillId);
+            if (handler == null) {
+                return JsonRpcResponse.error(-32602, "Unknown skill: " + skillId, request.id());
+            }
+            if (handler instanceof ReportGenerationSkillHandler reportHandler) {
+                Task result = reportHandler.continueTask(taskId, sessionId, history);
+                taskRepository.save(result);
+                return JsonRpcResponse.success(result, request.id());
+            }
         }
-
-        Task result;
-        if (isContinuation && handler instanceof ReportGenerationSkillHandler reportHandler) {
-            result = reportHandler.continueTask(taskId, sessionId, history);
-        } else {
-            result = handler.handle(taskId, sessionId, history);
+        // 新任务：交给 AsyncTaskExecutor 异步执行，立即返回 submitted 状态
+        // 任务完成后 AsyncTaskExecutor 会自动向注册的 Webhook 地址发回调
+        try {
+            Task submitted = asyncTaskExecutor.submitAsync(taskId, sessionId, skillId, history);
+            return JsonRpcResponse.success(submitted, request.id());
+        } catch (IllegalArgumentException e) {
+            return JsonRpcResponse.error(-32602, e.getMessage(), request.id());
         }
-
-        taskRepository.save(result);
-        return JsonRpcResponse.success(result, request.id());
     }
 
     /** tasks/get：按 taskId 返回任务当前快照 */
@@ -142,5 +157,22 @@ public class A2aController {
             }).toList();
             return new Message(role, parts);
         }).toList();
+    }
+
+    private JsonRpcResponse handleSetPushNotification(JsonRpcRequest request) {
+        Map<String, Object> params = request.params();
+        String taskId = (String) params.get("id");
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> config = (Map<String, Object>) params.get("pushNotification");
+        String callbackUrl = (String) config.get("url");
+        String secret = (String) config.getOrDefault("token", null);
+
+        webhookRegistry.register(taskId, callbackUrl, secret);
+
+        return JsonRpcResponse.success(Map.of(
+                "id", taskId,
+                "pushNotification", Map.of("url", callbackUrl)
+        ), request.id());
     }
 }

@@ -3,6 +3,7 @@ package com.ray.a2a.controller;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ray.a2a.model.*;
 import com.ray.a2a.repository.TaskRepository;
+import com.ray.a2a.skill.ReportGenerationSkillHandler;
 import com.ray.a2a.skill.SkillHandler;
 import org.springframework.web.bind.annotation.*;
 
@@ -61,41 +62,33 @@ public class A2aController {
      *   - 解析参数（taskId、sessionId、skillId、history）     *   - 先落库一条 SUBMITTED 状态的任务（便于后续 tasks/get 查询）     *   - 按 skillId 找 SkillHandler，找不到返回 -32602     *   - 同步执行 handler.handle()，拿到 COMPLETED 状态的 Task     *   - 覆盖落库，返回完整 Task     * 
      */
     private JsonRpcResponse handleTaskSend(JsonRpcRequest request) {
-        try {
-            // 解析参数
-            Map<String, Object> params = request.params();
-            String taskId = (String) params.getOrDefault("id", UUID.randomUUID().toString());
-            String sessionId = (String) params.getOrDefault("sessionId", UUID.randomUUID().toString());
-            String skillId = (String) params.get("skillId");
+        Map<String, Object> params = request.params();
+        String taskId = (String) params.getOrDefault("id", UUID.randomUUID().toString());
+        String sessionId = (String) params.getOrDefault("sessionId", UUID.randomUUID().toString());
+        String skillId = (String) params.get("skillId");
 
-            // 解析消息历史（client 传的是 List<Map>，转成强类型 List<Message>）
-            List<Map<String, Object>> rawHistory = (List<Map<String, Object>>) params.get("history");
-            List<Message> history = parseHistory(rawHistory);
+        List<Message> history = parseHistory(
+                (List<Map<String, Object>>) params.get("history"));
 
-            // 先保存 submitted 状态（任务生命周期起点）
-            Task submittedTask = new Task(
-                    taskId, sessionId,
-                    new TaskStatus(TaskState.SUBMITTED, null, Instant.now().toString()),
-                    history, List.of(), Map.of()
-            );
-            taskRepository.save(submittedTask);
+        // 检查是否是续传任务（同一 taskId 且之前处于 input-required 状态）
+        Task existingTask = taskRepository.findById(taskId);
+        boolean isContinuation = existingTask != null &&
+                TaskState.INPUT_REQUIRED.equals(existingTask.status().state());
 
-            // 找到对应的 Skill 处理器
-            SkillHandler handler = skillHandlers.get(skillId);
-            if (handler == null) {
-                return JsonRpcResponse.error(-32602,
-                        "Unknown skill: " + skillId, request.id());
-            }
-
-            // 执行 Skill（同步阻塞，内部会调 LLM）
-            Task completedTask = handler.handle(taskId, sessionId, history);
-            taskRepository.save(completedTask);
-
-            return JsonRpcResponse.success(completedTask, request.id());
-
-        } catch (Exception e) {
-            return JsonRpcResponse.error(-32603, "Internal error: " + e.getMessage(), request.id());
+        SkillHandler handler = skillHandlers.get(skillId);
+        if (handler == null) {
+            return JsonRpcResponse.error(-32602, "Unknown skill: " + skillId, request.id());
         }
+
+        Task result;
+        if (isContinuation && handler instanceof ReportGenerationSkillHandler reportHandler) {
+            result = reportHandler.continueTask(taskId, sessionId, history);
+        } else {
+            result = handler.handle(taskId, sessionId, history);
+        }
+
+        taskRepository.save(result);
+        return JsonRpcResponse.success(result, request.id());
     }
 
     /** tasks/get：按 taskId 返回任务当前快照 */

@@ -22,7 +22,6 @@ import java.util.Map;
  * Debug 提示：报告较长时注意 yml 里 spring.ai.openai.max-tokens 要给够（8192+），
  * 否则 DeepSeek 推理模型会因 reasoning_content 占满预算而输出空 content。
  */
-@Component
 public class SalesReportSkillHandler implements StreamingSkillHandler {
 
     private final ChatClient chatClient;

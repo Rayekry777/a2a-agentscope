@@ -1,0 +1,8 @@
+spring:
+  application:
+    name: agentscope-ai
+
+agentscope:
+  dashscope:
+    api-key: ${DASHSCOPE_API_KEY}
+    model-name: deepseek-v4-flash-0731

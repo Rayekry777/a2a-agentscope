@@ -11,6 +11,7 @@
     <modules>
         <module>a2a-server</module>
         <module>a2a-client</module>
+        <module>agentscope</module>
     </modules>
 
     <properties>

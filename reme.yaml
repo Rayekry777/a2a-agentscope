@@ -1,0 +1,25 @@
+# ReMe 项目级配置：继承内置 default.yaml，只补齐"向量检索"这条链路
+# 用法：reme start config=reme.yaml
+# 说明：default.yaml 里 as_embedding / embedding_store / file_store.embedding_store
+#       三处都是注释状态，因此默认只有 BM25 关键词检索，没有语义召回。
+extends: default
+
+components:
+  as_embedding:
+    default:
+      backend: openai
+      model: text-embedding-v4
+      dimensions: 1024
+      credential:
+        api_key: ${EMBEDDING_API_KEY}
+        base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      parameters: { }
+
+  embedding_store:
+    default:
+      backend: local
+      as_embedding: default
+
+  file_store:
+    default:
+      embedding_store: default

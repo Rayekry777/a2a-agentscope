@@ -1,6 +1,8 @@
 spring:
   application:
     name: agentscope-ai
+  config:
+    import: optional:file:./.env[.properties]
 
 agentscope:
   dashscope:

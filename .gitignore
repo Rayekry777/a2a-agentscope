@@ -34,3 +34,7 @@ build/
 
 ### Mac OS ###
 .DS_Store
+
+### ReMe / 本地密钥 ###
+.env
+.reme/
